@@ -1,0 +1,298 @@
+buatkan website absensi karyawan yang sudah integrasi dengan iot, saya menggunakan esp32 devkit+rfid+lcd+fingerprint. gunakan backend express
+
+untuk registrasinya tambahkan button "tambah data" di bagian karyawan, kemudian bakal muncul pop up form baru nanti ada form nya, untuk form yang rfid itu bisa scan juga utuk ambil datanya atau manual input(button scan)
+Tambahkan fitur edit dan hapus data karyawan dengan konfirmasi dialog
+
+Alur absensinya nanti tuh:
+scan rfid nya -> jika terdaftar lanjut 2fa ya dengan scan fingerprint nya, jika cocok absen berhasil
+
+sama untuk checkout nya juga
+
+ini code iot esp nya
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <HardwareSerial.h>
+#include <Adafruit_Fingerprint.h>
+
+// ===============================================================
+// MODULE CONFIG
+// ===============================================================
+#define SDA_PIN 21
+#define RST_PIN 22
+MFRC522 rfid(SDA_PIN, RST_PIN);
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+#define FP_RX 16
+#define FP_TX 17
+HardwareSerial FingerSerial(2);
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&FingerSerial);
+
+// ===============================================================
+// WIFI CONFIG
+// ===============================================================
+const char* ssid     = "ACCESS POINT";
+const char* password = "warung98";
+
+const char* API_HOST = "192.168.0.101";
+const int   API_PORT = 5000;
+
+// ===============================================================
+// GLOBAL STATE
+// ===============================================================
+bool waitingFingerprint = false;        // TRUE → fingerprint untuk ENROLLING
+String currentRFID = "";                // RFID terakhir untuk attendance
+
+// ===============================================================
+// WIFI CONNECT
+// ===============================================================
+void connectWiFi() {
+  lcd.clear();
+  lcd.print("Connecting WiFi");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected!");
+  lcd.clear();
+  lcd.print("WiFi Connected");
+  delay(800);
+  lcd.clear();
+  lcd.print("Scan RFID/FP");
+}
+
+// ===============================================================
+// HTTP POST JSON
+// ===============================================================
+bool httpPost(const String& path, const String& body, String& resp) {
+  WiFiClient client;
+
+  if (!client.connect(API_HOST, API_PORT)) {
+    Serial.println("❌ API Connect Failed");
+    return false;
+  }
+
+  String req =
+    "POST " + path + " HTTP/1.1\r\n"
+    "Host: " + String(API_HOST) + ":" + API_PORT + "\r\n"
+    "Content-Type: application/json\r\n"
+    "Connection: close\r\n"
+    "Content-Length: " + String(body.length()) + "\r\n\r\n" +
+    body;
+
+  client.print(req);
+
+  unsigned long start = millis();
+  while (!client.available()) {
+    if (millis() - start > 6000) {
+      Serial.println("❌ Timeout");
+      client.stop();
+      return false;
+    }
+    delay(5);
+  }
+
+  String full = "";
+  while (client.available()) full += client.readString();
+
+  int idx = full.indexOf("\r\n\r\n");
+  resp = (idx != -1) ? full.substring(idx + 4) : full;
+
+  Serial.println("=== API RESP ===");
+  Serial.println(resp);
+  Serial.println("================");
+
+  return full.startsWith("HTTP/1.1 200") || full.startsWith("HTTP/1.1 201");
+}
+
+// ===============================================================
+// SEND RFID → API (Register or Attendance)
+// ===============================================================
+void sendRFID(String uid) {
+  String body = "{\"rfidId\":\"" + uid + "\"}";
+  String resp;
+
+  if (!httpPost("/api/esp/scan", body, resp)) {
+    lcd.clear();
+    lcd.print("API Error RFID");
+    delay(1500);
+    return;
+  }
+
+  currentRFID = uid;
+
+  // RFID for registration
+  if (resp.indexOf("RFID ready for registration") >= 0) {
+    lcd.clear();
+    lcd.print("RFID OK");
+    delay(1000);
+    lcd.clear();
+    lcd.print("Fill form web");
+    return;
+  }
+
+  // Attendance: fingerprint required
+  if (resp.indexOf("NEED_FINGERPRINT") >= 0) {
+    waitingFingerprint = true;
+    lcd.clear();
+    lcd.print("Tempel Finger");
+    return;
+  }
+
+  // Attendance OK (no fingerprint)
+  if (resp.indexOf("Attendance OK") >= 0) {
+    lcd.clear();
+    lcd.print("Absensi OK");
+    delay(1200);
+    lcd.clear();
+    lcd.print("Scan RFID/FP");
+    return;
+  }
+
+  // User not found
+  if (resp.indexOf("User not found") >= 0) {
+    lcd.clear();
+    lcd.print("Not Registered");
+    delay(1200);
+    lcd.clear();
+    lcd.print("Scan RFID/FP");
+    return;
+  }
+
+  lcd.clear();
+  lcd.print("Unknown API");
+  delay(1200);
+  lcd.print("Scan RFID/FP");
+}
+
+// ===============================================================
+// SEND FINGERPRINT → API
+// ===============================================================
+void sendFingerprint(int fpId) {
+  String resp;
+
+  // =========================================================
+  // 1) FINGERPRINT ENROLL MODE
+  // =========================================================
+  if (waitingFingerprint) {
+    String body = "{\"fingerId\":" + String(fpId) + "}";
+
+    httpPost("/api/esp/fp-enrolled", body, resp);
+
+    lcd.clear();
+    lcd.print("FP Enrolled");
+
+    waitingFingerprint = false;
+    delay(1500);
+    lcd.clear();
+    lcd.print("Scan RFID/FP");
+    return;
+  }
+
+  // =========================================================
+  // 2) NORMAL FINGERPRINT ATTENDANCE
+  // =========================================================
+  String body = "{\"rfidId\":\"" + currentRFID + "\",\"fingerId\":" + String(fpId) + "}";
+
+  if (!httpPost("/api/esp/scan-fp", body, resp)) {
+    lcd.clear();
+    lcd.print("FP Err");
+    delay(1200);
+    return;
+  }
+
+  if (resp.indexOf("MATCH") >= 0) {
+    lcd.clear();
+    lcd.print("FP Cocok");
+  } else if (resp.indexOf("MISMATCH") >= 0) {
+    lcd.clear();
+    lcd.print("FP Salah");
+  } else {
+    lcd.clear();
+    lcd.print("Unknown Resp");
+  }
+
+  waitingFingerprint = false;
+  delay(1500);
+  lcd.clear();
+  lcd.print("Scan RFID/FP");
+}
+
+// ===============================================================
+// SETUP
+// ===============================================================
+void setup() {
+  Serial.begin(115200);
+
+  Wire.begin(4, 5);
+  lcd.init();
+  lcd.backlight();
+
+  SPI.begin();
+  rfid.PCD_Init();
+
+  FingerSerial.begin(57600, SERIAL_8N1, FP_RX, FP_TX);
+  finger.begin(57600);
+
+  lcd.print("Init Modules");
+  delay(800);
+
+  connectWiFi();
+}
+
+// ===============================================================
+// MAIN LOOP
+// ===============================================================
+void loop() {
+
+  // ===========================================================
+  // FINGERPRINT ENROLL OR VERIFY
+  // ===========================================================
+  if (waitingFingerprint) {
+    uint8_t fp = finger.getImage();
+
+    if (fp == FINGERPRINT_OK) {
+      finger.image2Tz();
+      int id = finger.fingerFastSearch();
+
+      if (id >= 0) {
+        sendFingerprint(finger.fingerID);
+      } else {
+        lcd.clear();
+        lcd.print("FP Not Found");
+        delay(1000);
+        lcd.clear();
+        lcd.print("Tempel Finger");
+      }
+    }
+  }
+
+  // ===========================================================
+  // RFID SCAN
+  // ===========================================================
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+
+    if (waitingFingerprint) return;
+
+    String uid = "";
+    for (byte i = 0; i < rfid.uid.size; i++)
+      uid += String(rfid.uid.uidByte[i], HEX);
+
+    uid.toUpperCase();
+
+    Serial.print("RFID: ");
+    Serial.println(uid);
+
+    sendRFID(uid);
+
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+}
