@@ -21,6 +21,7 @@ export interface IStorage {
 
   // ESP32 Pending RFID
   setPendingRfid(rfidId: string): void;
+  setPendingFingerId(fingerId: number): boolean;
   getPendingRfid(): PendingRfidScan | null;
   clearPendingRfid(): void;
 }
@@ -140,10 +141,17 @@ export class MemStorage implements IStorage {
     this.pendingRfid = { rfidId, scannedAt: new Date() };
   }
 
+  setPendingFingerId(fingerId: number): boolean {
+    if (!this.pendingRfid) return false;
+    this.pendingRfid.fingerId = fingerId;
+    this.pendingRfid.scannedAt = new Date(); // refresh timestamp
+    return true;
+  }
+
   getPendingRfid(): PendingRfidScan | null {
     if (!this.pendingRfid) return null;
     const elapsed = Date.now() - this.pendingRfid.scannedAt.getTime();
-    if (elapsed > 30000) {
+    if (elapsed > 60000) { // extended to 60 seconds for fingerprint enrollment
       this.pendingRfid = null;
       return null;
     }

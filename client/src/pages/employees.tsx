@@ -93,6 +93,7 @@ export default function Employees() {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
   const [isScanning, setIsScanning] = useState(false);
+  const [isEnrollingFp, setIsEnrollingFp] = useState(false);
 
   const { data: employees = [], isLoading } = useQuery<Employee[]>({
     queryKey: ["/api/employees"],
@@ -159,49 +160,118 @@ export default function Employees() {
   );
 
   const handleScanRfid = async () => {
-  try {
-    setIsScanning(true);
-    toast({
-      title: "Mode Pendaftaran RFID",
-      description: "Tempelkan kartu RFID pada scanner",
-    });
+    try {
+      setIsScanning(true);
+      toast({
+        title: "Mode Pendaftaran RFID",
+        description: "Tempelkan kartu RFID pada scanner",
+      });
 
-    // 1. TELL BACKEND TO ENABLE REGISTER MODE
-    await apiRequest("POST", "/api/esp/start-register");
+      // 1. TELL BACKEND TO ENABLE REGISTER MODE
+      await apiRequest("POST", "/api/esp/start-register");
 
-    // 2. MULAI POLLING pending-rfid (sudah ada)
-    const interval = setInterval(async () => {
-      const pending = await apiRequest("GET", "/api/esp/pending-rfid");
-      if (pending && pending.rfidId) {
-        form.setValue("rfidId", pending.rfidId);
-        toast({
-          title: "RFID Terdeteksi",
-          description: `ID: ${pending.rfidId}`,
-        });
+      // 2. MULAI POLLING pending-rfid (sudah ada)
+      const interval = setInterval(async () => {
+        const pending = await apiRequest("GET", "/api/esp/pending-rfid");
+        if (pending && pending.rfidId) {
+          form.setValue("rfidId", pending.rfidId);
 
+          // Jika fingerprint juga sudah ada, set juga
+          if (pending.fingerId !== null && pending.fingerId !== undefined) {
+            form.setValue("fingerprintId", pending.fingerId);
+          }
+
+          toast({
+            title: "RFID Terdeteksi",
+            description: `ID: ${pending.rfidId}`,
+          });
+
+          clearInterval(interval);
+          setIsScanning(false);
+
+          // JANGAN hapus pending disini, karena masih dibutuhkan untuk enroll fingerprint
+          // Pending akan dihapus saat employee berhasil dibuat
+        }
+      }, 800);
+
+      // Stop scanning after 10s
+      setTimeout(() => {
         clearInterval(interval);
         setIsScanning(false);
+      }, 10000);
 
-        // optional bersihkan pending
-        await apiRequest("DELETE", "/api/esp/pending-rfid");
-      }
-    }, 800);
-
-    // Stop scanning after 10s
-    setTimeout(() => {
-      clearInterval(interval);
+    } catch (err) {
       setIsScanning(false);
-    }, 10000);
+      toast({
+        title: "Error",
+        description: "Gagal mengaktifkan mode scan RFID",
+        variant: "destructive",
+      });
+    }
+  };
 
-  } catch (err) {
-    setIsScanning(false);
-    toast({
-      title: "Error",
-      description: "Gagal mengaktifkan mode scan RFID",
-      variant: "destructive",
-    });
-  }
-};
+  const handleEnrollFingerprint = async () => {
+    const currentRfid = form.getValues("rfidId");
+
+    if (!currentRfid) {
+      toast({
+        title: "RFID Diperlukan",
+        description: "Scan RFID terlebih dahulu sebelum enroll fingerprint",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      setIsEnrollingFp(true);
+      toast({
+        title: "Mode Enroll Fingerprint",
+        description: "Tempelkan jari pada sensor fingerprint",
+      });
+
+      // Poll for fingerprint ID from pending RFID
+      let attempts = 0;
+      const maxAttempts = 60; // 60 seconds timeout
+
+      const interval = setInterval(async () => {
+        attempts++;
+
+        try {
+          const pending = await apiRequest("GET", "/api/esp/pending-rfid");
+
+          if (pending && pending.fingerId !== null && pending.fingerId !== undefined) {
+            form.setValue("fingerprintId", pending.fingerId);
+            toast({
+              title: "Fingerprint Terdaftar",
+              description: `ID: ${pending.fingerId}`,
+            });
+            clearInterval(interval);
+            setIsEnrollingFp(false);
+          }
+
+          if (attempts >= maxAttempts) {
+            clearInterval(interval);
+            setIsEnrollingFp(false);
+            toast({
+              title: "Timeout",
+              description: "Tidak ada fingerprint terdeteksi",
+              variant: "destructive",
+            });
+          }
+        } catch (err) {
+          // Continue polling on error
+        }
+      }, 1000);
+
+    } catch (err) {
+      setIsEnrollingFp(false);
+      toast({
+        title: "Error",
+        description: "Gagal mengaktifkan mode enroll fingerprint",
+        variant: "destructive",
+      });
+    }
+  };
 
 
   const openEditDialog = (employee: Employee) => {
@@ -349,7 +419,7 @@ export default function Employees() {
                         {employee.fingerprintId ? (
                           <Badge className="bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400">
                             <Fingerprint className="h-3 w-3 mr-1" />
-                            Terdaftar
+                            ID: {employee.fingerprintId}
                           </Badge>
                         ) : (
                           <Badge variant="outline" className="text-muted-foreground">
@@ -521,8 +591,18 @@ export default function Employees() {
                           data-testid="input-fingerprint"
                         />
                       </FormControl>
-                      <Button type="button" variant="outline" disabled data-testid="button-enroll-fingerprint">
-                        <Fingerprint className="h-4 w-4" />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        disabled={isEnrollingFp || !form.getValues("rfidId")}
+                        onClick={handleEnrollFingerprint}
+                        data-testid="button-enroll-fingerprint"
+                      >
+                        {isEnrollingFp ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Fingerprint className="h-4 w-4" />
+                        )}
                         <span className="ml-2">Enroll</span>
                       </Button>
                     </div>

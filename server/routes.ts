@@ -24,7 +24,7 @@ export async function registerRoutes(
   // Debug endpoint to test attendance manually
   app.post("/api/test/attendance", async (req, res) => {
     const { employeeId } = req.body;
-    
+
     if (!employeeId) {
       return res.status(400).json({ error: "employeeId required" });
     }
@@ -35,7 +35,7 @@ export async function registerRoutes(
     }
 
     const today = new Date().toISOString().split("T")[0];
-    
+
     try {
       const result = await storage.createAttendance({
         employeeId: employee.id,
@@ -44,11 +44,11 @@ export async function registerRoutes(
         date: today,
         method: "test"
       });
-      
-      res.json({ 
-        status: "OK", 
+
+      res.json({
+        status: "OK",
         message: "Test attendance created",
-        data: result 
+        data: result
       });
     } catch (error) {
       res.status(500).json({ error: error });
@@ -114,7 +114,22 @@ export async function registerRoutes(
   app.post("/api/employees", async (req, res) => {
     try {
       const data = parseBody(insertEmployeeSchema, req.body);
+
+      // Check if there's a pending RFID with fingerId that matches this employee's RFID
+      const pending = storage.getPendingRfid();
+      if (pending && pending.rfidId === data.rfidId && pending.fingerId !== undefined) {
+        // Use the fingerId from pending registration
+        data.fingerprintId = pending.fingerId;
+        console.log(`[CREATE EMPLOYEE] Using pending fingerId: ${pending.fingerId} for RFID: ${data.rfidId}`);
+      }
+
       const employee = await storage.createEmployee(data);
+
+      // Clear pending if we used it
+      if (pending && pending.rfidId === data.rfidId) {
+        storage.clearPendingRfid();
+      }
+
       res.status(201).json(employee);
     } catch (error) {
       res.status(400).json({ message: "Invalid employee data", error });
@@ -175,7 +190,7 @@ export async function registerRoutes(
   app.get("/api/esp/pending-rfid", async (_req, res) => {
     const pending = storage.getPendingRfid();
     if (pending) {
-      res.json({ rfidId: pending.rfidId });
+      res.json({ rfidId: pending.rfidId, fingerId: pending.fingerId ?? null });
     } else {
       res.json(null);
     }
@@ -188,62 +203,62 @@ export async function registerRoutes(
   });
 
   // FE meminta ESP masuk mode pendaftaran RFID
-app.post("/api/esp/start-register", async (_req, res) => {
-  registerMode = true;
-  storage.clearPendingRfid();
-  return res.json({ status: "OK", message: "Register mode ON" });
-});
+  app.post("/api/esp/start-register", async (_req, res) => {
+    registerMode = true;
+    storage.clearPendingRfid();
+    return res.json({ status: "OK", message: "Register mode ON" });
+  });
 
 
   // ESP32: RFID Scan endpoint
   // Called when RFID card is scanned on ESP32
   app.post("/api/esp/scan", async (req, res) => {
-  const { rfidId } = req.body;
+    const { rfidId } = req.body;
 
-  if (!rfidId) {
-    return res.status(400).json({ status: "ERROR", message: "RFID ID required" });
-  }
+    if (!rfidId) {
+      return res.status(400).json({ status: "ERROR", message: "RFID ID required" });
+    }
 
-  // ===============================
-  // 1️⃣ PRIORITAS: MODE REGISTER
-  // ===============================
-  if (registerMode) {
-    registerMode = false; // hanya sekali
-    storage.setPendingRfid(rfidId);
+    // ===============================
+    // 1️⃣ PRIORITAS: MODE REGISTER
+    // ===============================
+    if (registerMode) {
+      registerMode = false; // hanya sekali
+      storage.setPendingRfid(rfidId);
+      return res.json({
+        status: "REGISTER_OK",
+        rfidId,
+        message: "RFID siap untuk pendaftaran"
+      });
+    }
+
+    // ===============================
+    // 2️⃣ NORMAL MODE: Absensi
+    // ===============================
+    const employee = await storage.getEmployeeByRfid(rfidId);
+
+    if (!employee) {
+      return res.json({
+        status: "UNKNOWN_CARD",
+        message: "Kartu tidak terdaftar"
+      });
+    }
+
+    // Fingerprint belum ada
+    if (!employee.fingerprintId) {
+      return res.json({
+        status: "NO_FINGERPRINT",
+        message: "Fingerprint belum terdaftar."
+      });
+    }
+
+    // Fingerprint wajib
     return res.json({
-      status: "REGISTER_OK",
-      rfidId,
-      message: "RFID siap untuk pendaftaran"
+      status: "NEED_FINGERPRINT",
+      message: "Tempel jari untuk verifikasi",
+      employeeId: employee.id
     });
-  }
-
-  // ===============================
-  // 2️⃣ NORMAL MODE: Absensi
-  // ===============================
-  const employee = await storage.getEmployeeByRfid(rfidId);
-
-  if (!employee) {
-    return res.json({
-      status: "UNKNOWN_CARD",
-      message: "Kartu tidak terdaftar"
-    });
-  }
-
-  // Fingerprint belum ada
-  if (!employee.fingerprintId) {
-    return res.json({
-      status: "NO_FINGERPRINT",
-      message: "Fingerprint belum terdaftar."
-    });
-  }
-
-  // Fingerprint wajib
-  return res.json({
-    status: "NEED_FINGERPRINT",
-    message: "Tempel jari untuk verifikasi",
-    employeeId: employee.id
   });
-});
 
 
   // ESP32: Fingerprint enrolled during registration
@@ -263,9 +278,10 @@ app.post("/api/esp/start-register", async (_req, res) => {
       });
     }
 
-    // Find employee with this RFID and update fingerprint
+    // Try to find employee with this RFID first
     const employee = await storage.getEmployeeByRfid(pending.rfidId);
     if (employee) {
+      // Employee exists, update fingerprint directly
       await storage.updateEmployee(employee.id, { fingerprintId: fingerId });
       storage.clearPendingRfid();
       return res.json({
@@ -274,9 +290,18 @@ app.post("/api/esp/start-register", async (_req, res) => {
       });
     }
 
+    // No employee yet - save fingerId to pending for later use when employee is created
+    const success = storage.setPendingFingerId(fingerId);
+    if (success) {
+      return res.json({
+        status: "FP_SAVED",
+        message: "Fingerprint saved, waiting for employee registration"
+      });
+    }
+
     return res.json({
-      status: "OK",
-      message: "Fingerprint ready for registration"
+      status: "ERROR",
+      message: "Failed to save fingerprint"
     });
   });
 
@@ -294,18 +319,27 @@ app.post("/api/esp/start-register", async (_req, res) => {
     // Find employee by RFID
     const employee = await storage.getEmployeeByRfid(rfidId);
     console.log(`[SCAN-FP] Employee found:`, employee ? `${employee.name} (ID: ${employee.id})` : "NOT FOUND");
-    
+
     if (!employee) {
       console.log(`[SCAN-FP] Error: User not found with RFID ${rfidId}`);
       return res.json({ status: "ERROR", message: "User not found" });
     }
 
-    // Verify fingerprint matches
-    console.log(`[SCAN-FP] Fingerprint check: expected=${employee.fingerprintId}, received=${fingerId}`);
-    if (employee.fingerprintId !== fingerId) {
-      console.log(`[SCAN-FP] Error: Fingerprint mismatch`);
+    // Verify fingerprint matches - use strict type comparison
+    const expectedFpId = employee.fingerprintId;
+    const receivedFpId = Number(fingerId);
+
+    console.log(`[SCAN-FP] Fingerprint check:`);
+    console.log(`  - Expected: ${expectedFpId} (type: ${typeof expectedFpId})`);
+    console.log(`  - Received: ${receivedFpId} (type: ${typeof receivedFpId})`);
+    console.log(`  - Match: ${expectedFpId === receivedFpId}`);
+
+    if (expectedFpId !== receivedFpId) {
+      console.log(`[SCAN-FP] ❌ MISMATCH! Employee fingerprint ID ${expectedFpId} does not match scanned ID ${receivedFpId}`);
       return res.json({ status: "MISMATCH", message: "Fingerprint does not match" });
     }
+
+    console.log(`[SCAN-FP] ✓ Fingerprint matched!`);
 
     // Fingerprint matched - record attendance
     const today = new Date().toISOString().split("T")[0];

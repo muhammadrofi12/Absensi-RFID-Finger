@@ -34,6 +34,7 @@ export type Attendance = typeof attendance.$inferSelect;
 // Pending RFID scan for registration
 export interface PendingRfidScan {
   rfidId: string;
+  fingerId?: number;
   scannedAt: Date;
 }
 

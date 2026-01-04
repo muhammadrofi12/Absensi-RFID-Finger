@@ -148,10 +148,14 @@ void sendRFID(const String& uid) {
 if (resp.indexOf("REGISTER_OK") >= 0) {
   lcd.clear();
   lcd.print("RFID Ready");
-  Serial.println("RFID accepted for registration.");
-  delay(1200);
-  resetState();
-  return;
+  lcd.setCursor(0, 1);
+  lcd.print("Tempel Finger");
+  
+  // Set mode enroll fingerprint - JANGAN reset state!
+  waitingFpEnroll = true;
+  
+  Serial.println("RFID accepted for registration. Waiting for fingerprint...");
+  return;  // Jangan reset, tunggu fingerprint
 }
 
   if (resp.indexOf("UNKNOWN_CARD") >= 0) {
@@ -200,22 +204,44 @@ if (resp.indexOf("REGISTER_OK") >= 0) {
 // SEND FINGERPRINT → API (ENROLL)
 // ===============================================================
 void sendFingerprintEnroll(int fpId) {
+  Serial.print("Sending fingerprint enroll, ID: ");
+  Serial.println(fpId);
+  
   String resp;
   String body = "{\"fingerId\":" + String(fpId) + "}";
-  // kalau backend butuh RFID juga:
-  // String body = "{\"rfidId\":\"" + currentRFID + "\",\"fingerId\":" + String(fpId) + "}";
 
   if (!httpPost("/api/esp/fp-enrolled", body, resp)) {
     lcd.clear();
     lcd.print("Enroll Err");
-    delay(1200);
+    lcd.setCursor(0, 1);
+    lcd.print("Coba lagi");
+    Serial.println("Failed to enroll fingerprint to server");
+    delay(2000);
     resetState();
     return;
   }
 
-  lcd.clear();
-  lcd.print("FP Enrolled");
-  delay(1500);
+  // Cek response status
+  if (resp.indexOf("FP_SAVED") >= 0 || resp.indexOf("OK") >= 0) {
+    lcd.clear();
+    lcd.print("FP Enrolled!");
+    lcd.setCursor(0, 1);
+    lcd.print("ID: " + String(fpId));
+    Serial.println("Fingerprint enrolled successfully: " + String(fpId));
+    delay(2500);
+  } else if (resp.indexOf("NO_PENDING") >= 0) {
+    lcd.clear();
+    lcd.print("Scan RFID dulu");
+    Serial.println("No pending RFID registration");
+    delay(2000);
+  } else {
+    lcd.clear();
+    lcd.print("Enroll OK");
+    lcd.setCursor(0, 1);
+    lcd.print("ID: " + String(fpId));
+    delay(2000);
+  }
+  
   resetState();
 }
 
@@ -246,24 +272,52 @@ void sendFingerprintVerify(int fpId) {
     return;
   }
 
-  if (resp.indexOf("MATCH") >= 0) {
+  // PENTING: Cek MISMATCH dulu sebelum MATCH karena "MISMATCH" mengandung "MATCH"!
+  if (resp.indexOf("MISMATCH") >= 0) {
     lcd.clear();
-    lcd.print("Absensi OK");
-    Serial.println("Fingerprint MATCH, absensi berhasil.");
-    delay(1500);
-    resetState();
-  } else if (resp.indexOf("MISMATCH") >= 0) {
-    lcd.clear();
-    lcd.print("FP Salah");
-    Serial.println("Fingerprint MISMATCH.");
-    delay(1500);
+    lcd.print("FP Tidak Cocok!");
+    lcd.setCursor(0, 1);
+    lcd.print("Coba lagi");
+    Serial.println("Fingerprint MISMATCH - tidak cocok dengan employee!");
+    delay(2000);
     // tetap nunggu fingerprint untuk coba lagi
     waitingFpVerify = true;
     lcd.clear();
     lcd.print("Tempel Finger");
+  } else if (resp.indexOf("ALREADY") >= 0) {
+    lcd.clear();
+    lcd.print("Sudah Absen");
+    lcd.setCursor(0, 1);
+    lcd.print("Hari Ini");
+    Serial.println("Sudah check-in dan check-out hari ini.");
+    delay(2000);
+    resetState();
+  } else if (resp.indexOf("MATCH") >= 0) {
+    // Cek apakah check-in atau check-out
+    if (resp.indexOf("checkin") >= 0) {
+      lcd.clear();
+      lcd.print("Check-In OK");
+      lcd.setCursor(0, 1);
+      lcd.print("Selamat Datang!");
+      Serial.println("Fingerprint MATCH - Check-in berhasil!");
+    } else if (resp.indexOf("checkout") >= 0) {
+      lcd.clear();
+      lcd.print("Check-Out OK");
+      lcd.setCursor(0, 1);
+      lcd.print("Sampai Jumpa!");
+      Serial.println("Fingerprint MATCH - Check-out berhasil!");
+    } else {
+      lcd.clear();
+      lcd.print("Absensi OK");
+      Serial.println("Fingerprint MATCH, absensi berhasil.");
+    }
+    delay(2000);
+    resetState();
   } else {
     lcd.clear();
     lcd.print("Resp Unknown");
+    lcd.setCursor(0, 1);
+    lcd.print("Coba lagi");
     Serial.println("Response fingerprint tidak dikenali.");
     delay(1500);
     resetState();
@@ -309,27 +363,52 @@ void loop() {
     uint8_t fp = finger.getImage();
 
     if (fp == FINGERPRINT_OK) {
-      finger.image2Tz();
-      int searchResult = finger.fingerFastSearch();
+      // Konversi image ke template
+      uint8_t tz = finger.image2Tz();
+      if (tz != FINGERPRINT_OK) {
+        Serial.println("Error converting image to template");
+        return;
+      }
+      
+      // Cari fingerprint di database sensor
+      uint8_t searchResult = finger.fingerFastSearch();
+      
+      Serial.print("Search result: ");
+      Serial.println(searchResult);
 
-      if (searchResult >= 0) {
+      // PENTING: Harus cek dengan FINGERPRINT_OK, bukan >= 0
+      if (searchResult == FINGERPRINT_OK) {
         int foundId = finger.fingerID;
+        int confidence = finger.confidence;
+        
         Serial.print("Fingerprint ID: ");
-        Serial.println(foundId);
+        Serial.print(foundId);
+        Serial.print(" | Confidence: ");
+        Serial.println(confidence);
+
+        // Tampilkan info di LCD
+        lcd.clear();
+        lcd.print("FP ID: " + String(foundId));
+        lcd.setCursor(0, 1);
+        lcd.print("Conf: " + String(confidence));
+        delay(800);
 
         if (waitingFpEnroll) {
+          waitingFpEnroll = false;
           sendFingerprintEnroll(foundId);
         } else if (waitingFpVerify) {
-          // 2FA attendance
-          waitingFpVerify = false;  // status lanjut di-handle di sendFingerprintVerify
+          waitingFpVerify = false;
           sendFingerprintVerify(foundId);
         }
 
       } else {
         lcd.clear();
         lcd.print("FP Not Found");
-        Serial.println("Fingerprint tidak ditemukan di sensor.");
-        delay(1000);
+        lcd.setCursor(0, 1);
+        lcd.print("Code: " + String(searchResult));
+        Serial.print("Fingerprint tidak ditemukan. Error code: ");
+        Serial.println(searchResult);
+        delay(1500);
         lcd.clear();
         lcd.print("Tempel Finger");
       }
