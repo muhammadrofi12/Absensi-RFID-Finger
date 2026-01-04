@@ -190,7 +190,11 @@ export async function registerRoutes(
   app.get("/api/esp/pending-rfid", async (_req, res) => {
     const pending = storage.getPendingRfid();
     if (pending) {
-      res.json({ rfidId: pending.rfidId, fingerId: pending.fingerId ?? null });
+      res.json({
+        rfidId: pending.rfidId,
+        fingerId: pending.fingerId ?? null,
+        enrollMode: pending.enrollMode ?? false
+      });
     } else {
       res.json(null);
     }
@@ -207,6 +211,26 @@ export async function registerRoutes(
     registerMode = true;
     storage.clearPendingRfid();
     return res.json({ status: "OK", message: "Register mode ON" });
+  });
+
+  // FE meminta ESP masuk mode enroll fingerprint BARU
+  app.post("/api/esp/start-fp-enroll", async (_req, res) => {
+    const pending = storage.getPendingRfid();
+    if (!pending) {
+      return res.status(400).json({
+        status: "ERROR",
+        message: "Scan RFID dulu sebelum enroll fingerprint"
+      });
+    }
+
+    storage.setEnrollMode(true);
+    console.log(`[FP-ENROLL] Enrollment mode activated for RFID: ${pending.rfidId}`);
+
+    return res.json({
+      status: "OK",
+      message: "Fingerprint enrollment mode ON",
+      rfidId: pending.rfidId
+    });
   });
 
 
@@ -381,6 +405,116 @@ export async function registerRoutes(
         message: "Already checked out today"
       });
     }
+  });
+
+  // ============================================================
+  // FINGERPRINT MANAGEMENT ENDPOINTS
+  // ============================================================
+
+  // ESP32: Poll for pending command
+  app.get("/api/esp/fingerprints/command", async (_req, res) => {
+    const command = storage.getCommand();
+    if (command) {
+      res.json({
+        hasCommand: true,
+        type: command.type,
+        slotId: command.slotId ?? null
+      });
+    } else {
+      res.json({ hasCommand: false });
+    }
+  });
+
+  // ESP32: Submit command result
+  app.post("/api/esp/fingerprints/result", async (req, res) => {
+    const { success, command, data, message } = req.body;
+
+    storage.setCommandResult({
+      success,
+      command,
+      data: data ?? [],
+      message
+    });
+
+    console.log(`[FP-MGMT] Command result received: ${command}, success: ${success}`);
+
+    res.json({ status: "OK" });
+  });
+
+  // Frontend: Get command result (poll)
+  app.get("/api/fingerprints/result", async (_req, res) => {
+    const result = storage.getCommandResult();
+    res.json(result);
+  });
+
+  // Frontend: Clear result after reading
+  app.delete("/api/fingerprints/result", async (_req, res) => {
+    storage.clearCommandResult();
+    res.json({ status: "OK" });
+  });
+
+  // Frontend: Trigger scan all fingerprints
+  app.post("/api/fingerprints/scan", async (_req, res) => {
+    storage.setCommand({
+      type: 'scan_all',
+      createdAt: new Date()
+    });
+    console.log(`[FP-MGMT] Scan all command queued`);
+    res.json({ status: "OK", message: "Scan command sent to ESP32" });
+  });
+
+  // Frontend: Get fingerprints with employee mapping
+  app.get("/api/fingerprints", async (_req, res) => {
+    const employees = await storage.getEmployees();
+    const result = storage.getCommandResult();
+
+    // If we have scan result, map employees to slots
+    if (result && result.command === 'scan_all' && result.data) {
+      const mappedSlots = result.data.map(slot => {
+        const employee = employees.find(e => e.fingerprintId === slot.slotId);
+        return {
+          ...slot,
+          employeeId: employee?.id ?? null,
+          employeeName: employee?.name ?? null
+        };
+      });
+      res.json({ slots: mappedSlots, hasData: true });
+    } else {
+      res.json({ slots: [], hasData: false });
+    }
+  });
+
+  // Frontend: Delete fingerprint at slot
+  app.delete("/api/fingerprints/:id", async (req, res) => {
+    const slotId = parseInt(req.params.id);
+    if (isNaN(slotId) || slotId < 1 || slotId > 127) {
+      return res.status(400).json({ status: "ERROR", message: "Invalid slot ID" });
+    }
+
+    storage.setCommand({
+      type: 'delete',
+      slotId,
+      createdAt: new Date()
+    });
+    console.log(`[FP-MGMT] Delete command queued for slot ${slotId}`);
+    res.json({ status: "OK", message: `Delete command sent for slot ${slotId}` });
+  });
+
+  // Frontend: Enroll fingerprint to specific slot
+  app.post("/api/fingerprints/enroll", async (req, res) => {
+    const { slotId } = req.body;
+
+    if (!slotId || slotId < 1 || slotId > 127) {
+      return res.status(400).json({ status: "ERROR", message: "Invalid slot ID (1-127)" });
+    }
+
+    storage.setCommand({
+      type: 'enroll',
+      slotId,
+      createdAt: new Date()
+    });
+    console.log(`[FP-MGMT] Enroll command queued for slot ${slotId}`);
+    res.json({ status: "OK", message: `Enroll command sent for slot ${slotId}` });
   });
 
   return httpServer;

@@ -35,6 +35,7 @@ export type Attendance = typeof attendance.$inferSelect;
 export interface PendingRfidScan {
   rfidId: string;
   fingerId?: number;
+  enrollMode?: boolean;  // true = ESP32 should enroll new fingerprint
   scannedAt: Date;
 }
 
@@ -53,4 +54,27 @@ export interface EspFingerprintResponse {
 // Attendance with employee details for display
 export interface AttendanceWithEmployee extends Attendance {
   employee?: Employee;
+}
+
+// ESP32 Command Queue for fingerprint management
+export interface EspCommand {
+  type: 'scan_all' | 'delete' | 'enroll';
+  slotId?: number;
+  createdAt: Date;
+}
+
+// Fingerprint slot info
+export interface FingerprintSlot {
+  slotId: number;
+  hasFingerprint: boolean;
+  employeeId?: string;
+  employeeName?: string;
+}
+
+// ESP32 command result
+export interface EspCommandResult {
+  success: boolean;
+  command: string;
+  data?: FingerprintSlot[];
+  message?: string;
 }

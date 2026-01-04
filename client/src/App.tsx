@@ -9,6 +9,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import Dashboard from "@/pages/dashboard";
 import Employees from "@/pages/employees";
 import Attendance from "@/pages/attendance";
+import Fingerprints from "@/pages/fingerprints";
 import NotFound from "@/pages/not-found";
 
 function Router() {
@@ -17,6 +18,7 @@ function Router() {
       <Route path="/" component={Dashboard} />
       <Route path="/employees" component={Employees} />
       <Route path="/attendance" component={Attendance} />
+      <Route path="/fingerprints" component={Fingerprints} />
       <Route component={NotFound} />
     </Switch>
   );

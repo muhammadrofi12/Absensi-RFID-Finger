@@ -35,9 +35,11 @@ const int   API_PORT = 5000;
 // ===============================================================
 // GLOBAL STATE
 // ===============================================================
-// TRUE → sedang nunggu fingerprint untuk ENROLL (kalau mau dipakai)
-// (saat ini belum dipakai, tapi disiapkan kalau nanti perlu)
+// TRUE → sedang nunggu fingerprint untuk SEARCH (link existing fingerprint)
 bool waitingFpEnroll = false;
+
+// TRUE → sedang nunggu fingerprint untuk ENROLL BARU (2x scan, simpan ke sensor)
+bool waitingFpEnrollNew = false;
 
 // TRUE → sedang nunggu fingerprint untuk VERIFIKASI (2FA attendance)
 bool waitingFpVerify = false;
@@ -50,6 +52,7 @@ String currentRFID = "";
 // ===============================================================
 void resetState() {
   waitingFpEnroll = false;
+  waitingFpEnrollNew = false;
   waitingFpVerify = false;
   currentRFID = "";
   lcd.clear();
@@ -124,6 +127,318 @@ bool httpPost(const String& path, const String& body, String& resp) {
 }
 
 // ===============================================================
+// HTTP GET (for polling server status)
+// ===============================================================
+bool httpGet(const String& path, String& resp) {
+  WiFiClient client;
+
+  if (!client.connect(API_HOST, API_PORT)) {
+    return false;
+  }
+
+  String req =
+    "GET " + path + " HTTP/1.1\r\n"
+    "Host: " + String(API_HOST) + ":" + API_PORT + "\r\n"
+    "Connection: close\r\n\r\n";
+
+  client.print(req);
+
+  unsigned long start = millis();
+  while (!client.available()) {
+    if (millis() - start > 3000) {
+      client.stop();
+      return false;
+    }
+    delay(5);
+  }
+
+  String full = "";
+  while (client.available()) full += client.readString();
+
+  client.stop();
+
+  int idx = full.indexOf("\r\n\r\n");
+  resp = (idx != -1) ? full.substring(idx + 4) : full;
+
+  return full.startsWith("HTTP/1.1 200");
+}
+
+// ===============================================================
+// CHECK ENROLLMENT MODE FROM SERVER
+// ===============================================================
+unsigned long lastEnrollCheck = 0;
+const unsigned long ENROLL_CHECK_INTERVAL = 2000; // Check every 2 seconds
+
+void checkEnrollModeFromServer() {
+  // Only check periodically and when not in any active mode
+  if (waitingFpEnroll || waitingFpVerify || waitingFpEnrollNew) return;
+  
+  unsigned long now = millis();
+  if (now - lastEnrollCheck < ENROLL_CHECK_INTERVAL) return;
+  lastEnrollCheck = now;
+  
+  String resp;
+  if (httpGet("/api/esp/pending-rfid", resp)) {
+    // Check if enrollMode is true
+    if (resp.indexOf("\"enrollMode\":true") >= 0) {
+      Serial.println("=== ENROLL MODE DETECTED FROM SERVER ===");
+      
+      // Extract rfidId if available
+      int rfidStart = resp.indexOf("\"rfidId\":\"");
+      if (rfidStart >= 0) {
+        rfidStart += 10;
+        int rfidEnd = resp.indexOf("\"", rfidStart);
+        if (rfidEnd > rfidStart) {
+          currentRFID = resp.substring(rfidStart, rfidEnd);
+          Serial.print("RFID for enrollment: ");
+          Serial.println(currentRFID);
+        }
+      }
+      
+      // Trigger new fingerprint enrollment
+      waitingFpEnrollNew = true;
+      enrollNewFingerprint();
+    }
+  }
+}
+
+// ===============================================================
+// FINGERPRINT MANAGEMENT: Check commands from server
+// ===============================================================
+unsigned long lastCmdCheck = 0;
+const unsigned long CMD_CHECK_INTERVAL = 3000; // Check every 3 seconds
+
+void checkFingerprintCommand() {
+  // Don't check if busy with other operations
+  if (waitingFpEnroll || waitingFpVerify || waitingFpEnrollNew) return;
+  
+  unsigned long now = millis();
+  if (now - lastCmdCheck < CMD_CHECK_INTERVAL) return;
+  lastCmdCheck = now;
+  
+  String resp;
+  if (!httpGet("/api/esp/fingerprints/command", resp)) return;
+  
+  // Check if there's a command
+  if (resp.indexOf("\"hasCommand\":true") < 0) return;
+  
+  Serial.println("=== FINGERPRINT COMMAND DETECTED ===");
+  Serial.println(resp);
+  
+  if (resp.indexOf("\"type\":\"scan_all\"") >= 0) {
+    scanAllFingerprints();
+  } else if (resp.indexOf("\"type\":\"delete\"") >= 0) {
+    // Extract slotId
+    int slotStart = resp.indexOf("\"slotId\":");
+    if (slotStart >= 0) {
+      slotStart += 9;
+      int slotEnd = resp.indexOf(",", slotStart);
+      if (slotEnd < 0) slotEnd = resp.indexOf("}", slotStart);
+      int slotId = resp.substring(slotStart, slotEnd).toInt();
+      deleteFingerprintSlot(slotId);
+    }
+  } else if (resp.indexOf("\"type\":\"enroll\"") >= 0) {
+    // Extract slotId
+    int slotStart = resp.indexOf("\"slotId\":");
+    if (slotStart >= 0) {
+      slotStart += 9;
+      int slotEnd = resp.indexOf(",", slotStart);
+      if (slotEnd < 0) slotEnd = resp.indexOf("}", slotStart);
+      int slotId = resp.substring(slotStart, slotEnd).toInt();
+      enrollToSlot(slotId);
+    }
+  }
+}
+
+// ===============================================================
+// FINGERPRINT MANAGEMENT: Scan all slots
+// ===============================================================
+void scanAllFingerprints() {
+  lcd.clear();
+  lcd.print("Scanning FP...");
+  Serial.println("Scanning all fingerprint slots...");
+  
+  String jsonData = "[";
+  bool first = true;
+  int count = 0;
+  
+  for (int i = 1; i <= 127; i++) {
+    uint8_t p = finger.loadModel(i);
+    if (p == FINGERPRINT_OK) {
+      if (!first) jsonData += ",";
+      jsonData += "{\"slotId\":" + String(i) + ",\"hasFingerprint\":true}";
+      first = false;
+      count++;
+    }
+  }
+  jsonData += "]";
+  
+  Serial.print("Found ");
+  Serial.print(count);
+  Serial.println(" fingerprints");
+  
+  // Send result to server
+  String body = "{\"success\":true,\"command\":\"scan_all\",\"data\":" + jsonData + "}";
+  String resp;
+  httpPost("/api/esp/fingerprints/result", body, resp);
+  
+  lcd.clear();
+  lcd.print("Found: " + String(count) + " FP");
+  delay(2000);
+  lcd.clear();
+  lcd.print("Scan RFID/FP");
+}
+
+// ===============================================================
+// FINGERPRINT MANAGEMENT: Delete fingerprint at slot
+// ===============================================================
+void deleteFingerprintSlot(int slotId) {
+  lcd.clear();
+  lcd.print("Deleting #" + String(slotId));
+  Serial.print("Deleting fingerprint at slot ");
+  Serial.println(slotId);
+  
+  uint8_t p = finger.deleteModel(slotId);
+  
+  String body;
+  if (p == FINGERPRINT_OK) {
+    body = "{\"success\":true,\"command\":\"delete\",\"message\":\"Slot " + String(slotId) + " deleted\"}";
+    lcd.setCursor(0, 1);
+    lcd.print("Berhasil!");
+    Serial.println("Delete success");
+  } else {
+    body = "{\"success\":false,\"command\":\"delete\",\"message\":\"Delete failed\"}";
+    lcd.setCursor(0, 1);
+    lcd.print("Gagal!");
+    Serial.println("Delete failed");
+  }
+  
+  String resp;
+  httpPost("/api/esp/fingerprints/result", body, resp);
+  
+  delay(2000);
+  lcd.clear();
+  lcd.print("Scan RFID/FP");
+}
+
+// ===============================================================
+// FINGERPRINT MANAGEMENT: Enroll to specific slot
+// ===============================================================
+void enrollToSlot(int slotId) {
+  Serial.print("=== ENROLLING TO SLOT ");
+  Serial.print(slotId);
+  Serial.println(" ===");
+  
+  // ===== SCAN PERTAMA =====
+  lcd.clear();
+  lcd.print("Tempel Jari");
+  lcd.setCursor(0, 1);
+  lcd.print("[1/2] Slot:" + String(slotId));
+  
+  uint8_t p = -1;
+  unsigned long timeout = millis() + 30000; // 30s timeout
+  while (p != FINGERPRINT_OK) {
+    if (millis() > timeout) {
+      String body = "{\"success\":false,\"command\":\"enroll\",\"message\":\"Timeout - no finger detected\"}";
+      String resp;
+      httpPost("/api/esp/fingerprints/result", body, resp);
+      lcd.clear();
+      lcd.print("Timeout!");
+      delay(2000);
+      resetState();
+      return;
+    }
+    p = finger.getImage();
+    delay(100);
+  }
+  
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    String body = "{\"success\":false,\"command\":\"enroll\",\"message\":\"Image convert error\"}";
+    String resp;
+    httpPost("/api/esp/fingerprints/result", body, resp);
+    lcd.clear();
+    lcd.print("Error!");
+    delay(2000);
+    resetState();
+    return;
+  }
+  
+  // ===== ANGKAT JARI =====
+  lcd.clear();
+  lcd.print("Angkat Jari...");
+  delay(1500);
+  while (finger.getImage() != FINGERPRINT_NOFINGER) delay(100);
+  
+  // ===== SCAN KEDUA =====
+  lcd.clear();
+  lcd.print("Tempel Lagi");
+  lcd.setCursor(0, 1);
+  lcd.print("[2/2] Slot:" + String(slotId));
+  
+  p = -1;
+  timeout = millis() + 30000;
+  while (p != FINGERPRINT_OK) {
+    if (millis() > timeout) {
+      String body = "{\"success\":false,\"command\":\"enroll\",\"message\":\"Timeout - second scan\"}";
+      String resp;
+      httpPost("/api/esp/fingerprints/result", body, resp);
+      lcd.clear();
+      lcd.print("Timeout!");
+      delay(2000);
+      resetState();
+      return;
+    }
+    p = finger.getImage();
+    delay(100);
+  }
+  
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    String body = "{\"success\":false,\"command\":\"enroll\",\"message\":\"Second image convert error\"}";
+    String resp;
+    httpPost("/api/esp/fingerprints/result", body, resp);
+    resetState();
+    return;
+  }
+  
+  // ===== BUAT MODEL =====
+  p = finger.createModel();
+  if (p != FINGERPRINT_OK) {
+    String body = "{\"success\":false,\"command\":\"enroll\",\"message\":\"Fingerprints did not match\"}";
+    String resp;
+    httpPost("/api/esp/fingerprints/result", body, resp);
+    lcd.clear();
+    lcd.print("Jari Beda!");
+    delay(2000);
+    resetState();
+    return;
+  }
+  
+  // ===== SIMPAN =====
+  p = finger.storeModel(slotId);
+  if (p == FINGERPRINT_OK) {
+    String body = "{\"success\":true,\"command\":\"enroll\",\"message\":\"Enrolled to slot " + String(slotId) + "\"}";
+    String resp;
+    httpPost("/api/esp/fingerprints/result", body, resp);
+    lcd.clear();
+    lcd.print("Enrolled!");
+    lcd.setCursor(0, 1);
+    lcd.print("Slot: " + String(slotId));
+    Serial.println("Enroll to slot success!");
+  } else {
+    String body = "{\"success\":false,\"command\":\"enroll\",\"message\":\"Store failed\"}";
+    String resp;
+    httpPost("/api/esp/fingerprints/result", body, resp);
+    lcd.clear();
+    lcd.print("Gagal Simpan!");
+  }
+  
+  delay(2500);
+  resetState();
+}
+
+// ===============================================================
 // SEND RFID → API (Register or Attendance)
 // ===============================================================
 void sendRFID(const String& uid) {
@@ -147,15 +462,23 @@ void sendRFID(const String& uid) {
   // --- CASE: RFID untuk pendaftaran karyawan ---
 if (resp.indexOf("REGISTER_OK") >= 0) {
   lcd.clear();
-  lcd.print("RFID Ready");
+  lcd.print("RFID OK!");
   lcd.setCursor(0, 1);
-  lcd.print("Tempel Finger");
+  lcd.print("Klik Enroll Web");
   
-  // Set mode enroll fingerprint - JANGAN reset state!
-  waitingFpEnroll = true;
+  // JANGAN set waitingFpEnroll disini!
+  // Tunggu trigger dari web UI via checkEnrollModeFromServer()
+  // yang akan memanggil enrollNewFingerprint() untuk enroll fingerprint BARU
   
-  Serial.println("RFID accepted for registration. Waiting for fingerprint...");
-  return;  // Jangan reset, tunggu fingerprint
+  Serial.println("RFID accepted. Click 'Enroll' button in web to start fingerprint enrollment.");
+  delay(2000);
+  
+  lcd.clear();
+  lcd.print("Menunggu...");
+  lcd.setCursor(0, 1);
+  lcd.print("Enroll dari Web");
+  
+  return;  // Jangan reset, tunggu trigger dari web
 }
 
   if (resp.indexOf("UNKNOWN_CARD") >= 0) {
@@ -198,6 +521,166 @@ if (resp.indexOf("REGISTER_OK") >= 0) {
   lcd.print("Unknown API");
   delay(1200);
   resetState();
+}
+
+// ===============================================================
+// FIND NEXT FREE SLOT IN FINGERPRINT SENSOR
+// ===============================================================
+int findNextFreeSlot() {
+  for (int i = 1; i <= 127; i++) {
+    uint8_t p = finger.loadModel(i);
+    if (p != FINGERPRINT_OK) {
+      // Slot is empty
+      return i;
+    }
+  }
+  return -1; // No free slot
+}
+
+// ===============================================================
+// ENROLL NEW FINGERPRINT (2-step scan + store to sensor)
+// ===============================================================
+void enrollNewFingerprint() {
+  Serial.println("=== ENROLLING NEW FINGERPRINT ===");
+  
+  // Find next available slot
+  int slotId = findNextFreeSlot();
+  if (slotId == -1) {
+    lcd.clear();
+    lcd.print("Sensor Penuh!");
+    Serial.println("No free slot in fingerprint sensor");
+    delay(2000);
+    resetState();
+    return;
+  }
+  
+  Serial.print("Using slot: ");
+  Serial.println(slotId);
+  
+  // ===== SCAN PERTAMA =====
+  lcd.clear();
+  lcd.print("Tempel Jari");
+  lcd.setCursor(0, 1);
+  lcd.print("[1/2]");
+  
+  Serial.println("[1/2] Waiting for finger...");
+  
+  uint8_t p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) {
+      delay(100);
+    } else if (p == FINGERPRINT_OK) {
+      Serial.println("Finger detected!");
+    } else {
+      Serial.print("Image error: ");
+      Serial.println(p);
+    }
+  }
+  
+  // Convert ke template 1
+  p = finger.image2Tz(1);
+  if (p != FINGERPRINT_OK) {
+    lcd.clear();
+    lcd.print("Error image");
+    Serial.println("Failed to convert image 1");
+    delay(2000);
+    resetState();
+    return;
+  }
+  Serial.println("Image 1 converted.");
+  
+  // ===== ANGKAT JARI =====
+  lcd.clear();
+  lcd.print("Angkat Jari...");
+  Serial.println("Remove finger...");
+  delay(1500);
+  
+  while (finger.getImage() != FINGERPRINT_NOFINGER) {
+    delay(100);
+  }
+  
+  // ===== SCAN KEDUA =====
+  lcd.clear();
+  lcd.print("Tempel Lagi");
+  lcd.setCursor(0, 1);
+  lcd.print("[2/2]");
+  
+  Serial.println("[2/2] Place same finger again...");
+  
+  p = -1;
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    if (p == FINGERPRINT_NOFINGER) {
+      delay(100);
+    } else if (p == FINGERPRINT_OK) {
+      Serial.println("Finger detected!");
+    } else {
+      Serial.print("Image error: ");
+      Serial.println(p);
+    }
+  }
+  
+  // Convert ke template 2
+  p = finger.image2Tz(2);
+  if (p != FINGERPRINT_OK) {
+    lcd.clear();
+    lcd.print("Error image 2");
+    Serial.println("Failed to convert image 2");
+    delay(2000);
+    resetState();
+    return;
+  }
+  Serial.println("Image 2 converted.");
+  
+  // ===== BUAT MODEL =====
+  lcd.clear();
+  lcd.print("Memproses...");
+  
+  Serial.println("Creating model...");
+  p = finger.createModel();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Model created!");
+  } else if (p == FINGERPRINT_ENROLLMISMATCH) {
+    lcd.clear();
+    lcd.print("Jari Beda!");
+    lcd.setCursor(0, 1);
+    lcd.print("Coba lagi");
+    Serial.println("Fingerprints did not match!");
+    delay(2000);
+    resetState();
+    return;
+  } else {
+    lcd.clear();
+    lcd.print("Error model");
+    Serial.print("Model error: ");
+    Serial.println(p);
+    delay(2000);
+    resetState();
+    return;
+  }
+  
+  // ===== SIMPAN KE SLOT =====
+  Serial.print("Storing to slot ");
+  Serial.println(slotId);
+  
+  p = finger.storeModel(slotId);
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Stored successfully!");
+    
+    // Kirim ke server
+    lcd.clear();
+    lcd.print("Mengirim...");
+    sendFingerprintEnroll(slotId);
+    
+  } else {
+    lcd.clear();
+    lcd.print("Gagal simpan");
+    Serial.print("Store error: ");
+    Serial.println(p);
+    delay(2000);
+    resetState();
+  }
 }
 
 // ===============================================================
@@ -355,6 +838,16 @@ void loop() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWiFi();
   }
+
+  // ===========================================================
+  // POLL SERVER FOR ENROLLMENT MODE (from web UI)
+  // ===========================================================
+  checkEnrollModeFromServer();
+
+  // ===========================================================
+  // POLL SERVER FOR FINGERPRINT MANAGEMENT COMMANDS
+  // ===========================================================
+  checkFingerprintCommand();
 
   // ===========================================================
   // FINGERPRINT HANDLING (ENROLL atau VERIFIKASI)

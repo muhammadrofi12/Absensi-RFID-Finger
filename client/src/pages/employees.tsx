@@ -224,14 +224,18 @@ export default function Employees() {
 
     try {
       setIsEnrollingFp(true);
+
+      // First, tell server to activate enrollment mode
+      await apiRequest("POST", "/api/esp/start-fp-enroll");
+
       toast({
         title: "Mode Enroll Fingerprint",
-        description: "Tempelkan jari pada sensor fingerprint",
+        description: "Tempelkan jari pada sensor fingerprint (2x scan)",
       });
 
       // Poll for fingerprint ID from pending RFID
       let attempts = 0;
-      const maxAttempts = 60; // 60 seconds timeout
+      const maxAttempts = 120; // 120 seconds timeout for 2-step enrollment
 
       const interval = setInterval(async () => {
         attempts++;
@@ -239,10 +243,11 @@ export default function Employees() {
         try {
           const pending = await apiRequest("GET", "/api/esp/pending-rfid");
 
+          // Check if fingerprint has been enrolled (fingerId is set and enrollMode is false)
           if (pending && pending.fingerId !== null && pending.fingerId !== undefined) {
             form.setValue("fingerprintId", pending.fingerId);
             toast({
-              title: "Fingerprint Terdaftar",
+              title: "Fingerprint Terdaftar!",
               description: `ID: ${pending.fingerId}`,
             });
             clearInterval(interval);
@@ -254,7 +259,7 @@ export default function Employees() {
             setIsEnrollingFp(false);
             toast({
               title: "Timeout",
-              description: "Tidak ada fingerprint terdeteksi",
+              description: "Tidak ada fingerprint terdeteksi dalam 2 menit",
               variant: "destructive",
             });
           }
@@ -267,7 +272,7 @@ export default function Employees() {
       setIsEnrollingFp(false);
       toast({
         title: "Error",
-        description: "Gagal mengaktifkan mode enroll fingerprint",
+        description: "Gagal mengaktifkan mode enroll fingerprint. Pastikan RFID sudah di-scan.",
         variant: "destructive",
       });
     }

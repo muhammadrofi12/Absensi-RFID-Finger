@@ -1,4 +1,4 @@
-import type { Employee, InsertEmployee, Attendance, InsertAttendance, AttendanceWithEmployee, PendingRfidScan } from "@shared/schema";
+import type { Employee, InsertEmployee, Attendance, InsertAttendance, AttendanceWithEmployee, PendingRfidScan, EspCommand, EspCommandResult, FingerprintSlot } from "@shared/schema";
 import { randomUUID } from "crypto";
 
 export interface IStorage {
@@ -22,19 +22,32 @@ export interface IStorage {
   // ESP32 Pending RFID
   setPendingRfid(rfidId: string): void;
   setPendingFingerId(fingerId: number): boolean;
+  setEnrollMode(enabled: boolean): boolean;
   getPendingRfid(): PendingRfidScan | null;
   clearPendingRfid(): void;
+
+  // ESP32 Command Queue (for fingerprint management)
+  setCommand(command: EspCommand): void;
+  getCommand(): EspCommand | null;
+  clearCommand(): void;
+  setCommandResult(result: EspCommandResult): void;
+  getCommandResult(): EspCommandResult | null;
+  clearCommandResult(): void;
 }
 
 export class MemStorage implements IStorage {
   private employees: Map<string, Employee>;
   private attendance: Map<string, Attendance>;
   private pendingRfid: PendingRfidScan | null;
+  private pendingCommand: EspCommand | null;
+  private commandResult: EspCommandResult | null;
 
   constructor() {
     this.employees = new Map();
     this.attendance = new Map();
     this.pendingRfid = null;
+    this.pendingCommand = null;
+    this.commandResult = null;
   }
 
   // ============ EMPLOYEES ============
@@ -144,6 +157,18 @@ export class MemStorage implements IStorage {
   setPendingFingerId(fingerId: number): boolean {
     if (!this.pendingRfid) return false;
     this.pendingRfid.fingerId = fingerId;
+    this.pendingRfid.enrollMode = false; // enrollment complete
+    this.pendingRfid.scannedAt = new Date(); // refresh timestamp
+    return true;
+  }
+
+  setEnrollMode(enabled: boolean): boolean {
+    if (!this.pendingRfid) return false;
+    this.pendingRfid.enrollMode = enabled;
+    if (enabled) {
+      // Clear existing fingerId when starting new enrollment
+      this.pendingRfid.fingerId = undefined;
+    }
     this.pendingRfid.scannedAt = new Date(); // refresh timestamp
     return true;
   }
@@ -151,7 +176,7 @@ export class MemStorage implements IStorage {
   getPendingRfid(): PendingRfidScan | null {
     if (!this.pendingRfid) return null;
     const elapsed = Date.now() - this.pendingRfid.scannedAt.getTime();
-    if (elapsed > 60000) { // extended to 60 seconds for fingerprint enrollment
+    if (elapsed > 120000) { // 120 seconds timeout for fingerprint enrollment
       this.pendingRfid = null;
       return null;
     }
@@ -160,6 +185,39 @@ export class MemStorage implements IStorage {
 
   clearPendingRfid(): void {
     this.pendingRfid = null;
+  }
+
+  // ============ COMMAND QUEUE (for fingerprint management) ============
+  setCommand(command: EspCommand): void {
+    this.pendingCommand = command;
+    this.commandResult = null; // Clear previous result
+  }
+
+  getCommand(): EspCommand | null {
+    if (!this.pendingCommand) return null;
+    const elapsed = Date.now() - this.pendingCommand.createdAt.getTime();
+    if (elapsed > 120000) { // 120 seconds timeout
+      this.pendingCommand = null;
+      return null;
+    }
+    return this.pendingCommand;
+  }
+
+  clearCommand(): void {
+    this.pendingCommand = null;
+  }
+
+  setCommandResult(result: EspCommandResult): void {
+    this.commandResult = result;
+    this.pendingCommand = null; // Clear command after result is set
+  }
+
+  getCommandResult(): EspCommandResult | null {
+    return this.commandResult;
+  }
+
+  clearCommandResult(): void {
+    this.commandResult = null;
   }
 }
 

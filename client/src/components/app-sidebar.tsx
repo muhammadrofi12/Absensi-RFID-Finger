@@ -4,6 +4,7 @@ import {
   Users,
   ClipboardList,
   Wifi,
+  Fingerprint,
 } from "lucide-react";
 import {
   Sidebar,
@@ -23,6 +24,7 @@ const menuItems = [
   { title: "Dashboard", url: "/", icon: LayoutDashboard },
   { title: "Karyawan", url: "/employees", icon: Users },
   { title: "Log Absensi", url: "/attendance", icon: ClipboardList },
+  { title: "Fingerprints", url: "/fingerprints", icon: Fingerprint },
 ];
 
 interface AppSidebarProps {
@@ -74,9 +76,8 @@ export function AppSidebar({ espConnected = false }: AppSidebarProps) {
       <SidebarFooter className="p-4 border-t border-sidebar-border">
         <div className="flex items-center gap-2">
           <div
-            className={`h-2 w-2 rounded-full ${
-              espConnected ? "bg-green-500 animate-pulse" : "bg-gray-400"
-            }`}
+            className={`h-2 w-2 rounded-full ${espConnected ? "bg-green-500 animate-pulse" : "bg-gray-400"
+              }`}
           />
           <span className="text-xs text-muted-foreground">
             ESP32 {espConnected ? "Terhubung" : "Tidak Terhubung"}
