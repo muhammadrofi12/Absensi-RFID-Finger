@@ -23,6 +23,7 @@ import {
   ArrowUpFromLine,
   CreditCard,
   Fingerprint,
+  Download,
 } from "lucide-react";
 import type { AttendanceWithEmployee, Employee } from "@shared/schema";
 import { format, parseISO, isToday, isYesterday } from "date-fns";
@@ -141,8 +142,17 @@ export default function Attendance() {
               <ClipboardList className="h-5 w-5" />
               Riwayat Absensi
             </CardTitle>
-            <div className="flex flex-col sm:flex-row gap-3">
-              <div className="relative">
+            <div className="flex flex-col sm:flex-row gap-3 items-center">
+              <Button
+                variant="outline"
+                className="gap-2 w-full sm:w-auto"
+                onClick={() => {
+                  window.open("/api/attendance/export", "_blank");
+                }}
+              >
+                <Download className="h-4 w-4" /> Export Excel
+              </Button>
+              <div className="relative w-full sm:w-auto">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   placeholder="Cari karyawan..."

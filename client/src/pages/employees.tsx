@@ -60,6 +60,7 @@ import {
   Fingerprint,
   Users,
   Loader2,
+  Key,
 } from "lucide-react";
 import type { Employee, InsertEmployee } from "@shared/schema";
 import { queryClient, apiRequest } from "@/lib/queryClient";
@@ -91,8 +92,32 @@ export default function Employees() {
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isCreateUserOpen, setIsCreateUserOpen] = useState(false);
+  const [createUserPassword, setCreateUserPassword] = useState("");
   const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
   const [isScanning, setIsScanning] = useState(false);
+
+  const createUserMutation = useMutation({
+    mutationFn: async (data: { employeeId: string; username: string; password: string }) => {
+      return await apiRequest("POST", "/api/users", data);
+    },
+    onSuccess: () => {
+      setIsCreateUserOpen(false);
+      setCreateUserPassword("");
+      toast({
+        title: "Berhasil",
+        description: `Akses login web aktif untuk ${selectedEmployee?.name}`,
+      });
+      setSelectedEmployee(null);
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Gagal mengaktifkan akses",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
 
   const { data: employees = [], isLoading } = useQuery<Employee[]>({
     queryKey: ["/api/employees"],
@@ -362,6 +387,17 @@ export default function Employees() {
                           <Button
                             size="icon"
                             variant="ghost"
+                            onClick={() => {
+                              setSelectedEmployee(employee);
+                              setIsCreateUserOpen(true);
+                            }}
+                            title="Aktifkan Login Web"
+                          >
+                            <Key className="h-4 w-4 text-violet-400" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
                             onClick={() => openEditDialog(employee)}
                             data-testid={`button-edit-${employee.id}`}
                           >
@@ -556,6 +592,79 @@ export default function Employees() {
               </DialogFooter>
             </form>
           </Form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create User Credentials Dialog */}
+      <Dialog
+        open={isCreateUserOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setIsCreateUserOpen(false);
+            setCreateUserPassword("");
+            setSelectedEmployee(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md bg-slate-900 border border-white/10 text-white">
+          <DialogHeader>
+            <DialogTitle>Aktifkan Akses Login Web</DialogTitle>
+            <DialogDescription className="text-slate-400">
+              Buat kredensial login portal untuk karyawan <strong>{selectedEmployee?.name}</strong>.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-slate-300">Username / NIP</label>
+              <Input
+                value={selectedEmployee?.employeeId || ""}
+                disabled
+                className="bg-slate-950/80 border-white/5 text-slate-400 cursor-not-allowed"
+              />
+              <span className="text-[10px] text-slate-500">Username login disamakan dengan NIP/ID Karyawan secara default.</span>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-slate-300">Password Baru</label>
+              <Input
+                type="password"
+                placeholder="Buat password login..."
+                value={createUserPassword}
+                onChange={(e) => setCreateUserPassword(e.target.value)}
+                className="bg-slate-950 border-white/10 text-white focus:border-violet-500"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              className="border-white/10 text-white hover:bg-white/5"
+              onClick={() => {
+                setIsCreateUserOpen(false);
+                setCreateUserPassword("");
+                setSelectedEmployee(null);
+              }}
+            >
+              Batal
+            </Button>
+            <Button
+              type="button"
+              className="bg-violet-600 hover:bg-violet-500 text-white"
+              onClick={() => {
+                if (selectedEmployee) {
+                  createUserMutation.mutate({
+                    employeeId: selectedEmployee.id,
+                    username: selectedEmployee.employeeId,
+                    password: createUserPassword,
+                  });
+                }
+              }}
+              disabled={createUserMutation.isPending || !createUserPassword}
+            >
+              {createUserMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Aktifkan Akses
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
