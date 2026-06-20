@@ -3,6 +3,9 @@ import {
   LayoutDashboard,
   Users,
   ClipboardList,
+  Calendar,
+  CalendarCheck2,
+  LogOut,
   Wifi,
 } from "lucide-react";
 import {
@@ -18,12 +21,7 @@ import {
   SidebarFooter,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
-
-const menuItems = [
-  { title: "Dashboard", url: "/", icon: LayoutDashboard },
-  { title: "Karyawan", url: "/employees", icon: Users },
-  { title: "Log Absensi", url: "/attendance", icon: ClipboardList },
-];
+import { useAuth } from "@/hooks/use-auth";
 
 interface AppSidebarProps {
   espConnected?: boolean;
@@ -31,6 +29,23 @@ interface AppSidebarProps {
 
 export function AppSidebar({ espConnected = false }: AppSidebarProps) {
   const [location] = useLocation();
+  const { user, logoutMutation } = useAuth();
+
+  const adminMenuItems = [
+    { title: "Dashboard HR", url: "/", icon: LayoutDashboard },
+    { title: "Karyawan", url: "/employees", icon: Users },
+    { title: "Log Absensi", url: "/attendance", icon: ClipboardList },
+    { title: "Cuti & Izin", url: "/leave", icon: CalendarCheck2 },
+    { title: "Shift Kerja", url: "/shifts", icon: Calendar },
+  ];
+
+  const employeeMenuItems = [
+    { title: "Dashboard Personal", url: "/", icon: LayoutDashboard },
+    { title: "Pengajuan Cuti", url: "/leave", icon: CalendarCheck2 },
+    { title: "Jadwal Shift", url: "/shifts", icon: Calendar },
+  ];
+
+  const menuItems = user?.role === "admin" ? adminMenuItems : employeeMenuItems;
 
   return (
     <Sidebar>
@@ -71,7 +86,17 @@ export function AppSidebar({ espConnected = false }: AppSidebarProps) {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className="p-4 border-t border-sidebar-border">
+      <SidebarFooter className="p-4 border-t border-sidebar-border space-y-3">
+        {user && (
+          <div className="flex flex-col gap-1 pb-1 border-b border-sidebar-border/50">
+            <span className="text-sm font-semibold text-sidebar-foreground truncate">
+              {user.username}
+            </span>
+            <span className="text-xs text-muted-foreground uppercase font-bold tracking-wider">
+              {user.role}
+            </span>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <div
             className={`h-2 w-2 rounded-full ${
@@ -87,6 +112,15 @@ export function AppSidebar({ espConnected = false }: AppSidebarProps) {
             </Badge>
           )}
         </div>
+        {user && (
+          <SidebarMenuButton
+            onClick={() => logoutMutation.mutate()}
+            className="w-full text-red-500 hover:text-red-400 hover:bg-red-500/10 cursor-pointer"
+          >
+            <LogOut className="h-4 w-4" />
+            <span>Keluar</span>
+          </SidebarMenuButton>
+        )}
       </SidebarFooter>
     </Sidebar>
   );

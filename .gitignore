@@ -4,3 +4,8 @@ dist
 server/public
 vite.config.ts.*
 *.tar.gz
+
+# Environment variables — jangan di-commit ke git!
+.env
+.env.*
+!.env.example
